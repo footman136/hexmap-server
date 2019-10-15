@@ -8,36 +8,92 @@
 using UnityEngine;
 using System.Collections;
 using System;
-;
+using System.Net;
+using System.Net.Sockets;
+using System.Xml.Xsl;
 
 public class ServerScript : MonoBehaviour {
 
-    private string receive_str;
-    IocpServer.IoServer server;
+    MicrosoftServer _server;
 
     private const int BUFF_SIZE = 1024;
-    private const int PLAYER_MAX_COUNT = 100;
+    private const int PLAYER_MAX_COUNT = 128;
+    [SerializeField] private  int PORT = 9999;
     byte[] ReceiveBuffer = new byte[BUFF_SIZE];
+
+    public event Action<SocketAsyncEventArgs, byte[], int> Received;
+    public event Action<SocketAsyncEventArgs, SocketAction> Completed; 
+    
+    public int ClientCount => _server.ClientCount;
+    public int MaxClientCount => _server.MaxClientCount;
+    public string Address => _server.Address;
+    public int Port => _server.Port; 
     
     // Use this for initialization
     void Start()
     {
         //初始化服务器
-        server = new IocpServer.IoServer(PLAYER_MAX_COUNT, BUFF_SIZE, OnReceive);
+        _server = new MicrosoftServer(PLAYER_MAX_COUNT, BUFF_SIZE, OnReceive);
+        _server.Init();
+        // 获得主机相关信息
+        IPAddress[] addressList = Dns.GetHostEntry(Environment.MachineName).AddressList;
+        IPEndPoint localEndPoint = new IPEndPoint(addressList[addressList.Length - 1], PORT);
+        _server.Start(localEndPoint);
+        _server.Completed += OnComplete;
+       
+        string msg = $"Server is listening at address - {_server.Address}:{_server.Port} ...";
+        Debug.Log(msg);
     }
 
-    void OnReceive(byte[] content, int size)
+    void OnDestroy()
     {
-        Array.Copy(content, 0, ReceiveBuffer, 0, size);        
-        receive_str = System.Text.Encoding.Default.GetString(content);
+        _server.Completed -= OnComplete;
+        _server.Stop();
+        Debug.Log("Server Stopped.");
     }
 
-    void OnGUI()
+    void OnReceive(SocketAsyncEventArgs args, byte[] content, int size)
     {
-        if (receive_str != null)
+        try
         {
-            var style = GUILayout.Width(600);
-            GUILayout.Label (receive_str, style);
+            //Array.Copy(content, 0, ReceiveBuffer, 0, size);        
+            Received?.Invoke(args, content, size);
         }
+        catch (Exception e)
+        {
+            string dataStr = System.Text.Encoding.Default.GetString(content);
+            Debug.LogError($"Server OnReceive() Exceptioon - size:{size} - data:{dataStr} - {e}");
+            throw;
+        }
+    }
+
+    void OnComplete(SocketAsyncEventArgs args, SocketAction action)
+    {
+        try
+        {
+            Completed?.Invoke(args, action);
+        }
+        catch (Exception e)
+        {
+            Debug.LogError($"Server OnComplete() Exception - {e}");
+            throw;
+        }
+    }
+
+    public void SendMsg(SocketAsyncEventArgs args, byte[] data, int size)
+    {
+        try
+        {
+            _server.Send(args, data, size);
+        }
+        catch (Exception e)
+        {
+            Debug.LogError($"Server SendMsg() Exception - {e}");
+            throw;
+        }
+    }
+    public void SendMsg(SocketAsyncEventArgs args, string data)
+    {
+        _server.Send(args, System.Text.Encoding.Default.GetBytes(data), data.Length);
     }
 }
