@@ -12,8 +12,6 @@ public class ChatManager : MonoBehaviour
     
     private string receive_str;
     
-    public event Action<SocketAsyncEventArgs, SocketAction> Completed; 
-    
     // Start is called before the first frame update
     void Start()
     {
