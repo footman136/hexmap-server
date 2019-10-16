@@ -25,7 +25,8 @@ public class MicrosoftServer
     const int opsToPreAlloc = 2;    // read, write (don't alloc buffer space for accepts)
     Socket listenSocket;            // the socket used to listen for incoming connection requests
     // pool of reusable SocketAsyncEventArgs objects for write, read and accept socket operations
-    SocketAsyncEventArgsPool m_readWritePool;
+    SocketAsyncEventArgsPool m_readPool;
+    SocketAsyncEventArgsPool m_writePool;
     int m_totalBytesRead;           // counter of the total # bytes received by the server
     int m_numConnectedSockets;      // the total number of clients connected to the server 
     Semaphore m_maxNumberAcceptedClients;
@@ -42,7 +43,7 @@ public class MicrosoftServer
     /// <summary>
     /// 接收到消息后的回调函数
     /// </summary>
-    public delegate void ReceiveCallBack(SocketAsyncEventArgs s, byte[] content, int size);
+    public delegate void ReceiveCallBack(SocketAsyncEventArgs s, byte[] content, int offset, int size);
     private ReceiveCallBack receiveCallBack;
 
     public event Action<SocketAsyncEventArgs, SocketAction> Completed; 
@@ -67,7 +68,8 @@ public class MicrosoftServer
         m_bufferManager = new BufferManager(receiveBufferSize * numConnections * opsToPreAlloc,
             receiveBufferSize);
   
-        m_readWritePool = new SocketAsyncEventArgsPool(numConnections);
+        m_readPool = new SocketAsyncEventArgsPool(numConnections);
+        m_writePool = new SocketAsyncEventArgsPool(numConnections);
         m_maxNumberAcceptedClients = new Semaphore(numConnections, numConnections);
 
         m_buffer = new List<Byte>();
@@ -85,20 +87,34 @@ public class MicrosoftServer
         m_bufferManager.InitBuffer();
 
         // preallocate pool of SocketAsyncEventArgs objects
-        SocketAsyncEventArgs readWriteEventArg;
+        SocketAsyncEventArgs readEventArg;
+        SocketAsyncEventArgs writeEventArg;
 
         for (int i = 0; i < m_numConnections; i++)
         {
+            ////////////////
             //Pre-allocate a set of reusable SocketAsyncEventArgs
-            readWriteEventArg = new SocketAsyncEventArgs();
-            readWriteEventArg.Completed += new EventHandler<SocketAsyncEventArgs>(IO_Completed);
-            readWriteEventArg.UserToken = new AsyncUserToken();
+            readEventArg = new SocketAsyncEventArgs();
+            readEventArg.Completed += new EventHandler<SocketAsyncEventArgs>(IO_Completed);
+            readEventArg.UserToken = new AsyncUserToken();
 
             // assign a byte buffer from the buffer pool to the SocketAsyncEventArg object
-            m_bufferManager.SetBuffer(readWriteEventArg);
+            m_bufferManager.SetBuffer(readEventArg);
 
             // add SocketAsyncEventArg to the pool
-            m_readWritePool.Push(readWriteEventArg);
+            m_readPool.Push(readEventArg);
+            
+            ////////////////
+            //Pre-allocate a set of reusable SocketAsyncEventArgs
+            writeEventArg = new SocketAsyncEventArgs();
+            writeEventArg.Completed += new EventHandler<SocketAsyncEventArgs>(IO_Completed);
+            writeEventArg.UserToken = new AsyncUserToken();
+
+            // assign a byte buffer from the buffer pool to the SocketAsyncEventArg object
+            m_bufferManager.SetBuffer(writeEventArg);
+
+            // add SocketAsyncEventArg to the pool
+            m_writePool.Push(writeEventArg);
         }
 
     }
@@ -115,6 +131,11 @@ public class MicrosoftServer
         
         // create the socket which listens for incoming connections
         listenSocket = new Socket(localEndPoint.AddressFamily, SocketType.Stream, ProtocolType.Tcp);
+        
+        // 使用Ngale算法，把小数据包合并为大数据包一起发送，这个方法也许从某种程度上可以防止一条消息被截断
+        // https://docs.microsoft.com/zh-cn/dotnet/api/system.net.sockets.socket.nodelay?redirectedfrom=MSDN&view=netframework-4.8#System_Net_Sockets_Socket_NoDelay
+        listenSocket.NoDelay = true;
+        
         listenSocket.Bind(localEndPoint);
         // start the server with a listen backlog of 100 connections
         listenSocket.Listen(100);
@@ -178,7 +199,7 @@ public class MicrosoftServer
 
         // Get the socket for the accepted client connection and put it into the 
         //ReadEventArg object user token
-        SocketAsyncEventArgs readEventArgs = m_readWritePool.Pop();
+        SocketAsyncEventArgs readEventArgs = m_readPool.Pop();
         ((AsyncUserToken)readEventArgs.UserToken).Socket = e.AcceptSocket;
         
         Completed?.Invoke(e, SocketAction.Accept); // 触发事件
@@ -239,71 +260,67 @@ public class MicrosoftServer
 
             try
             {
-//                if (token.Socket.Available == 0)
-//                {
-//                    // 消息提交外部的回调函数处理
-//                    Completed?.Invoke(e, SocketAction.Receive);
-//                    receiveCallBack?.Invoke(e, e.Buffer, e.BytesTransferred);
-//                    // 
-//                    //token.Socket.ReceiveAsync(e);
-//                }
-//                else if (!token.Socket.ReceiveAsync(e))//为接收下一段数据，投递接收请求，这个函数有可能同步完成，这时返回false，并且不会引发SocketAsyncEventArgs.Completed事件
-//                {
-//                    //同步接收时处理接收完成事件
-//                    ProcessReceive(e);
-//                }
-
-                //读取数据  
-                byte[] data = new byte[e.BytesTransferred];
-                Debug.Log($"Server Found data received - {e.BytesTransferred} byts");
-                Array.Copy(e.Buffer, e.Offset, data, 0, e.BytesTransferred);  
-                lock (m_buffer)  
-                {  
-                    m_buffer.AddRange(data);  
-                }  
-  
-                do  
-                {  
-                    //注意: 这里是需要和服务器有协议的,我做了个简单的协议,就是一个完整的包是包长(4字节)+包数据,便于处理,当然你可以定义自己需要的;   
-                    //判断包的长度,前面4个字节.  
-                    byte[] lenBytes = m_buffer.GetRange(0, 4).ToArray();  
-                    int packageLen = BitConverter.ToInt32(lenBytes, 0);  
-                    if (packageLen <= m_buffer.Count - 4)  
-                    {  
-                        //包够长时,则提取出来,交给后面的程序去处理  
-                        byte[] rev = m_buffer.GetRange(4, packageLen).ToArray();  
-                        //从数据池中移除这组数据,为什么要lock,你懂的  
-                        lock (m_buffer)  
-                        {  
-                            m_buffer.RemoveRange(0, packageLen + 4);  
-                        }  
-                        //将数据包交给前台去处理  
-                        Completed?.Invoke(e, SocketAction.Receive);
-                        receiveCallBack?.Invoke(e, rev, rev.Length);
-                    }  
-                    else  
-                    {   //长度不够,还得继续接收,需要跳出循环  
-                        break;  
-                    }  
-                } while (m_buffer.Count > 4);  
-                //注意:你一定会问,这里为什么要用do-while循环?     
-                //如果当服务端发送大数据流的时候,e.BytesTransferred的大小就会比服务端发送过来的完整包要小,    
-                //需要分多次接收.所以收到包的时候,先判断包头的大小.够一个完整的包再处理.    
-                //如果服务器短时间内发送多个小数据包时, 这里可能会一次性把他们全收了.    
-                //这样如果没有一个循环来控制,那么只会处理第一个包,    
-                //剩下的包全部留在m_buffer中了,只有等下一个数据包过来后,才会放出一个来.  
-                //继续接收  
-                if (!token.Socket.ReceiveAsync(e))
+                // 消息提交外部的回调函数处理
+                Completed?.Invoke(e, SocketAction.Receive);
+                receiveCallBack?.Invoke(e, e.Buffer, e.Offset, e.BytesTransferred);
+                
+                if (!token.Socket.ReceiveAsync(e))//为接收下一段数据，投递接收请求，这个函数有可能同步完成，这时返回false，并且不会引发SocketAsyncEventArgs.Completed事件
                 {
+                    //同步接收时处理接收完成事件
                     ProcessReceive(e);
                 }
+
+//                //读取数据  
+//                byte[] data = new byte[e.BytesTransferred];
+//                Debug.Log($"Server Found data received - {e.BytesTransferred} byts");
+//                Array.Copy(e.Buffer, e.Offset, data, 0, e.BytesTransferred);  
+//                lock (m_buffer)  
+//                {  
+//                    m_buffer.AddRange(data);  
+//                }  
+//  
+//                do  
+//                {  
+//                    //注意: 这里是需要和服务器有协议的,我做了个简单的协议,就是一个完整的包是包长(4字节)+包数据,便于处理,当然你可以定义自己需要的;   
+//                    //判断包的长度,前面4个字节.  
+//                    byte[] lenBytes = m_buffer.GetRange(0, 4).ToArray();  
+//                    int packageLen = BitConverter.ToInt32(lenBytes, 0);  
+//                    if (packageLen <= m_buffer.Count - 4)  
+//                    {  
+//                        //包够长时,则提取出来,交给后面的程序去处理  
+//                        byte[] rev = m_buffer.GetRange(4, packageLen).ToArray();  
+//                        //从数据池中移除这组数据,为什么要lock,你懂的  
+//                        lock (m_buffer)  
+//                        {  
+//                            m_buffer.RemoveRange(0, packageLen + 4);  
+//                        }  
+//                        //将数据包交给前台去处理  
+//                        Completed?.Invoke(e, SocketAction.Receive);
+//                        receiveCallBack?.Invoke(e, rev, rev.Length);
+//                    }  
+//                    else  
+//                    {   //长度不够,还得继续接收,需要跳出循环  
+//                        break;  
+//                    }  
+//                } while (m_buffer.Count > 4);  
+//                //注意:你一定会问,这里为什么要用do-while循环?     
+//                //如果当服务端发送大数据流的时候,e.BytesTransferred的大小就会比服务端发送过来的完整包要小,    
+//                //需要分多次接收.所以收到包的时候,先判断包头的大小.够一个完整的包再处理.    
+//                //如果服务器短时间内发送多个小数据包时, 这里可能会一次性把他们全收了.    
+//                //这样如果没有一个循环来控制,那么只会处理第一个包,    
+//                //剩下的包全部留在m_buffer中了,只有等下一个数据包过来后,才会放出一个来.  
+//                //继续接收  
+//                if (!token.Socket.ReceiveAsync(e))
+//                {
+//                    ProcessReceive(e);
+//                }
             }
             catch (Exception exp)
             {
                 int size = e.BytesTransferred;
-                string dataStr = System.Text.Encoding.Default.GetString(e.Buffer);
+                string dataStr = System.Text.Encoding.UTF8.GetString(e.Buffer);
                 string errorMsg = $"Server ProcessReceive() Exception - size:{size} - data:{dataStr} - {exp}";
-                e.SetBuffer(System.Text.Encoding.Default.GetBytes(errorMsg), 0, errorMsg.Length);
+                e.SetBuffer(System.Text.Encoding.UTF8.GetBytes(errorMsg), 0, errorMsg.Length);
                 Completed?.Invoke(e, SocketAction.Error);
                 throw;
             }
@@ -325,15 +342,16 @@ public class MicrosoftServer
     {
         if (e.SocketError == SocketError.Success)
         {
+            m_writePool.Push(e);
             Completed?.Invoke(e, SocketAction.Send);
             // done echoing data back to the client
-            AsyncUserToken token = (AsyncUserToken)e.UserToken;
+            //AsyncUserToken token = (AsyncUserToken)e.UserToken;
             // read the next block of data send from the client
-            bool willRaiseEvent = token.Socket.ReceiveAsync(e);
-            if (!willRaiseEvent)
-            {
-                ProcessReceive(e);
-            }
+//            bool willRaiseEvent = token.Socket.ReceiveAsync(e);
+//            if (!willRaiseEvent)
+//            {
+//                ProcessReceive(e);
+//            }
         }
         else
         {
@@ -343,9 +361,11 @@ public class MicrosoftServer
 
     public void Send(SocketAsyncEventArgs e, byte[] data, int size)
     {
-        e.SetBuffer(data, 0, size);
         AsyncUserToken token = (AsyncUserToken)e.UserToken;
-        bool willRaiseEvent = token.Socket.SendAsync(e);
+        SocketAsyncEventArgs writeEventArgs = m_writePool.Pop();
+        writeEventArgs.UserToken = token;
+        writeEventArgs.SetBuffer(data, 0, size);
+        bool willRaiseEvent = token.Socket.SendAsync(writeEventArgs);
         if (!willRaiseEvent)
         {
             ProcessSend(e);
@@ -370,7 +390,7 @@ public class MicrosoftServer
         Interlocked.Decrement(ref m_numConnectedSockets);
         
         // Free the SocketAsyncEventArg so they can be reused by another client
-        m_readWritePool.Push(e);
+        m_readPool.Push(e);
         
         m_maxNumberAcceptedClients.Release();
         //Console.WriteLine("A client has been disconnected from the server. There are {0} clients connected to the server", m_numConnectedSockets);

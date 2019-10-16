@@ -29,7 +29,7 @@ public class ChatManager : MonoBehaviour
 
     void OnReceive(SocketAsyncEventArgs args, byte[] content, int size)
     {
-        receive_str = System.Text.Encoding.Default.GetString(content);
+        receive_str = System.Text.Encoding.UTF8.GetString(content);
         ProcessMsg(args, content, size);
     }
 
@@ -66,7 +66,7 @@ public class ChatManager : MonoBehaviour
                 Debug.Log(receive_str);
                 break;
             case SocketAction.Error:
-                receive_str = System.Text.Encoding.Default.GetString(args.Buffer);
+                receive_str = System.Text.Encoding.UTF8.GetString(args.Buffer);
                 Debug.LogError(receive_str);
                 break;
         }
@@ -88,7 +88,7 @@ public class ChatManager : MonoBehaviour
     /// <param name="content"></param>
     void ProcessMsg(SocketAsyncEventArgs args, byte[] content, int size)
     {
-        var message = System.Text.Encoding.Default.GetString (content, 0, size);
+        var message = System.Text.Encoding.UTF8.GetString (content, 0, size);
         var dataJson = JsonMapper.ToObject(message);
         int cmdId = Int32.Parse(dataJson["cmd_id"].ToString());
         switch ((MsgExplain.CMD)cmdId)

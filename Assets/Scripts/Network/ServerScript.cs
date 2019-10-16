@@ -52,17 +52,17 @@ public class ServerScript : MonoBehaviour {
         Debug.Log("Server Stopped.");
     }
 
-    void OnReceive(SocketAsyncEventArgs args, byte[] content, int size)
+    void OnReceive(SocketAsyncEventArgs args, byte[] content, int offset, int size)
     {
         try
         {
-            //Array.Copy(content, 0, ReceiveBuffer, 0, size);        
-            Received?.Invoke(args, content, size);
+            Array.Copy(content, offset, ReceiveBuffer, 0, size);        
+            Received?.Invoke(args, ReceiveBuffer, size);
         }
         catch (Exception e)
         {
-            string dataStr = System.Text.Encoding.Default.GetString(content);
-            Debug.LogError($"Server OnReceive() Exceptioon - size:{size} - data:{dataStr} - {e}");
+            string dataStr = System.Text.Encoding.UTF8.GetString(content);
+            Debug.LogError($"Server OnReceive() Exceptioon - offset:{offset} - size:{size} - data:{dataStr} - {e}");
             throw;
         }
     }
@@ -92,8 +92,9 @@ public class ServerScript : MonoBehaviour {
             throw;
         }
     }
-    public void SendMsg(SocketAsyncEventArgs args, string data)
+    public void SendMsg(SocketAsyncEventArgs args, string dataStr)
     {
-        _server.Send(args, System.Text.Encoding.Default.GetBytes(data), data.Length);
+        byte[] dataBytes = System.Text.Encoding.UTF8.GetBytes(dataStr);
+        _server.Send(args, dataBytes, dataBytes.Length);
     }
 }
