@@ -270,6 +270,7 @@ public class MicrosoftServer
                     ProcessReceive(e);
                 }
 
+                // 真正的互联网环境下会有消息包被截断的情况，所以发送的时候必须在开始定义4个字节的包长度，目前是测试阶段，暂时不开放。
 //                //读取数据  
 //                byte[] data = new byte[e.BytesTransferred];
 //                Debug.Log($"Server Found data received - {e.BytesTransferred} byts");
